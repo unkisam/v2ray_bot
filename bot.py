@@ -58,8 +58,8 @@ ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '8552949710').split(',')]
 DATABASE_PATH = 'bot_database.db'
 
 # ==================== شماره کارت برای واریز ====================
-CARD_NUMBER = os.getenv('CARD_NUMBER', '6037-9971-XXXX-XXXX')
-CARD_HOLDER = os.getenv('CARD_HOLDER', 'نام صاحب کارت')
+CARD_NUMBER = os.getenv('CARD_NUMBER', '6037-9917-6124-5137')
+CARD_HOLDER = os.getenv('CARD_HOLDER', '.')
 CARD_BANK = os.getenv('CARD_BANK', 'بانک ملی')
 
 # ==================== ENUMS ====================
@@ -1550,10 +1550,14 @@ def main():
 
     if not db.get_all_plans():
         logger.info("Adding default plans...")
-        db.add_plan('۳۰ روزه', 50000, '50 GB', 30)
-        db.add_plan('۶۰ روزه', 90000, '120 GB', 60)
-        db.add_plan('۹۰ روزه', 120000, '200 GB', 90)
-
+        db.add_plan('90 روزه', 390000, '1 GB', 90)
+        db.add_plan('90 روزه', 780000, '2 GB', 90)
+        db.add_plan('90 روزه', 1170000, '3 GB', 90)
+        db.add_plan('90 روزه',1490000, '5 GB', 90)
+        db.add_plan('90 روزه',2490000, '10 GB', 90)
+        db.add_plan('90 روزه',3575000, '15 GB', 90)
+        db.add_plan('90 روزه',4950000, '20 GB', 90)
+        
     app = Application.builder().token(BOT_TOKEN).build()
     handlers = BotHandlers(db)
 
