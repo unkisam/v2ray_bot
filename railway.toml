@@ -1,0 +1,10 @@
+[build]
+builder = "nixpacks"
+
+[start]
+cmd = "python v2ray_bot.py"
+
+[[services]]
+name = "bot"
+plan = "starter"
+autoDeploy = true
