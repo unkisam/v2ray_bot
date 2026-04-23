@@ -1550,13 +1550,13 @@ def main():
 
     if not db.get_all_plans():
         logger.info("Adding default plans...")
-        db.add_plan('90 روزه', 390000, '1 GB', 90)
-        db.add_plan('90 روزه', 780000, '2 GB', 90)
-        db.add_plan('90 روزه', 1170000, '3 GB', 90)
-        db.add_plan('90 روزه',1490000, '5 GB', 90)
-        db.add_plan('90 روزه',2490000, '10 GB', 90)
-        db.add_plan('90 روزه',3575000, '15 GB', 90)
-        db.add_plan('90 روزه',4950000, '20 GB', 90)
+        db.add_plan('1', 390000, '1 GB', 90)
+        db.add_plan('2 روزه', 780000, '2 GB', 90)
+        db.add_plan('3 روزه', 1170000, '3 GB', 90)
+        db.add_plan('4 روزه',1490000, '5 GB', 90)
+        db.add_plan('5 روزه',2490000, '10 GB', 90)
+        db.add_plan('6 روزه',3575000, '15 GB', 90)
+        db.add_plan('7 روزه',4950000, '20 GB', 90)
         
     app = Application.builder().token(BOT_TOKEN).build()
     handlers = BotHandlers(db)
