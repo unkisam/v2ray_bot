@@ -655,7 +655,7 @@ class BotHandlers:
             ['👛 کیف پول', '💬 پشتیبانی']
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        text = '👋 خوش آمدید به ربات فروش سرویس V2Ray\n\nلطفا گزینه مورد نظر را انتخاب کنید:'
+        text = '👋 خوش آمدید به ربات TrustVpn سرویس V2Ray\n\nلطفا گزینه مورد نظر را انتخاب کنید:'
         msg = update.message or (update.callback_query.message if update.callback_query else None)
         if msg:
             await msg.reply_text(text, reply_markup=reply_markup)
@@ -1550,13 +1550,13 @@ def main():
 
     if not db.get_all_plans():
         logger.info("Adding default plans...")
-        db.add_plan('1', 390000, '1 GB', 90)
-        db.add_plan('2 روزه', 780000, '2 GB', 90)
-        db.add_plan('3 روزه', 1170000, '3 GB', 90)
-        db.add_plan('4 روزه',1490000, '5 GB', 90)
-        db.add_plan('5 روزه',2490000, '10 GB', 90)
-        db.add_plan('6 روزه',3575000, '15 GB', 90)
-        db.add_plan('7 روزه',4950000, '20 GB', 90)
+        db.add_plan('1GB', 390000, '1 GB', 90)
+        db.add_plan('2GB ', 780000, '2 GB', 90)
+        db.add_plan('3GB ', 1170000, '3 GB', 90)
+        db.add_plan('4GB ',1490000, '5 GB', 90)
+        db.add_plan('5GB ',2490000, '10 GB', 90)
+        db.add_plan('6GB ',3575000, '15 GB', 90)
+        db.add_plan('7GB ',4950000, '20 GB', 90)
         
     app = Application.builder().token(BOT_TOKEN).build()
     handlers = BotHandlers(db)
