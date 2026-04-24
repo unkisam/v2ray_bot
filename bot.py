@@ -1550,9 +1550,9 @@ def main():
 
     if not db.get_all_plans():
         logger.info("Adding default plans...")
-        db.add_plan('1GB', 390000, '1 GB', 90)
-        db.add_plan('2GB ', 780000, '2 GB', 90)
-        db.add_plan('3GB ', 1170000, '3 GB', 90)
+        db.add_plan('1GB', 350000, '1 GB', 90)
+        db.add_plan('2GB ', 600000, '2 GB', 90)
+        db.add_plan('3GB ', 950000, '3 GB', 90)
         db.add_plan('5GB ',1490000, '5 GB', 90)
         db.add_plan('10GB ',2490000, '10 GB', 90)
         db.add_plan('15GB ',3575000, '15 GB', 90)
