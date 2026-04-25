@@ -1550,13 +1550,13 @@ def main():
 
     if not db.get_all_plans():
         logger.info("Adding default plans...")
-        db.add_plan('1GB', 350000, '1 GB', 90)
-        db.add_plan('2GB ', 600000, '2 GB', 90)
-        db.add_plan('3GB ', 950000, '3 GB', 90)
-        db.add_plan('5GB ',1490000, '5 GB', 90)
-        db.add_plan('10GB ',2490000, '10 GB', 90)
-        db.add_plan('15GB ',3575000, '15 GB', 90)
-        db.add_plan('20GB ',4950000, '20 GB', 90)
+        db.add_plan('1GB', 347000, '1 GB', 90)
+        db.add_plan('2GB ', 547000, '2 GB', 90)
+        db.add_plan('3GB ', 947000, '3 GB', 90)
+        db.add_plan('5GB ',1347000, '5 GB', 90)
+        db.add_plan('10GB ',2247000, '10 GB', 90)
+        db.add_plan('15GB ',3147000, '15 GB', 90)
+        db.add_plan('20GB ',4547000, '20 GB', 90)
         
     app = Application.builder().token(BOT_TOKEN).build()
     handlers = BotHandlers(db)
