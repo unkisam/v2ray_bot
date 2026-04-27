@@ -2,32 +2,31 @@
 """
 Production-Grade V2Ray Config Telegram Bot
 با سیستم فاکتور، ارسال رسید و تایید دستی توسط ادمین
+دیتابیس: PostgreSQL (Railway)
 """
 
 import os
-import json
-import sqlite3
 import logging
 import asyncio
-import hashlib
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict
 from dataclasses import dataclass
 from enum import Enum
 import base64
 
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, User
+import psycopg2
+import psycopg2.extras
+
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ConversationHandler,
     ContextTypes,
     filters,
 )
-from telegram.constants import ChatAction
 from flask import Flask
 from threading import Thread
 
@@ -45,6 +44,7 @@ def run_web():
 
 
 Thread(target=run_web, daemon=True).start()
+
 # ==================== LOGGING SETUP ====================
 logging.basicConfig(
     level=logging.INFO,
@@ -54,13 +54,14 @@ logger = logging.getLogger(__name__)
 
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8520873297:AAH6WANR20WXYMOaRrMaztKjTipzoojG028')
-ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '8552949710').split(',')]
-DATABASE_PATH = 'bot_database.db'
+ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '8552949710').split(',') if x.strip()]
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:LgOSszzUWzYlfoZdMRUVyiGbpEogeUnW@postgres.railway.internal:5432/railway')  # Railway این رو خودکار میذاره
 
 # ==================== شماره کارت برای واریز ====================
 CARD_NUMBER = os.getenv('CARD_NUMBER', '6037-9917-6124-5137')
 CARD_HOLDER = os.getenv('CARD_HOLDER', '.')
 CARD_BANK = os.getenv('CARD_BANK', 'بانک ملی')
+
 
 # ==================== ENUMS ====================
 class UserState(Enum):
@@ -71,9 +72,9 @@ class UserState(Enum):
     ADMIN_WAITING_FOR_PLAN_TRAFFIC = 7
     ADMIN_WAITING_FOR_PLAN_DURATION = 8
     ADMIN_SEARCH_USER = 10
-    WAITING_FOR_RECEIPT_PHOTO = 11       # انتظار برای عکس رسید
-    ADMIN_WAITING_FOR_CONFIG = 12        # ادمین داره کانفیگ تایپ می‌کنه
-    ADMIN_WAITING_FOR_WALLET_AMOUNT = 13 # ادمین داره مبلغ کیف پول می‌فرسته
+    WAITING_FOR_RECEIPT_PHOTO = 11
+    ADMIN_WAITING_FOR_CONFIG = 12
+    ADMIN_WAITING_FOR_WALLET_AMOUNT = 13
 
 
 # ==================== DATA CLASSES ====================
@@ -115,13 +116,12 @@ class Payment:
 
 # ==================== DATABASE MANAGER ====================
 class DatabaseManager:
-    def __init__(self, db_path: str = DATABASE_PATH):
-        self.db_path = db_path
+    def __init__(self, database_url: str):
+        self.database_url = database_url
         self.init_database()
 
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = psycopg2.connect(self.database_url)
         return conn
 
     def init_database(self):
@@ -130,32 +130,32 @@ class DatabaseManager:
         try:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    telegram_id INTEGER UNIQUE NOT NULL,
+                    id SERIAL PRIMARY KEY,
+                    telegram_id BIGINT UNIQUE NOT NULL,
                     username TEXT,
                     first_name TEXT,
                     wallet REAL DEFAULT 0,
                     join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    is_active BOOLEAN DEFAULT 1,
+                    is_active BOOLEAN DEFAULT TRUE,
                     last_activity TIMESTAMP
                 )
             ''')
 
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS plans (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     name TEXT UNIQUE NOT NULL,
                     price REAL NOT NULL,
                     traffic TEXT NOT NULL,
                     duration INTEGER NOT NULL,
-                    is_active BOOLEAN DEFAULT 1,
+                    is_active BOOLEAN DEFAULT TRUE,
                     created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS services (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
                     plan_id INTEGER NOT NULL,
                     config TEXT DEFAULT '',
@@ -169,7 +169,7 @@ class DatabaseManager:
 
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS payments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
                     amount REAL NOT NULL,
                     status TEXT DEFAULT 'pending',
@@ -184,7 +184,7 @@ class DatabaseManager:
 
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS support_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
                     message TEXT NOT NULL,
                     reply TEXT,
@@ -195,10 +195,6 @@ class DatabaseManager:
             ''')
 
             conn.commit()
-
-            # ========== MIGRATION: ستون‌های جدید به جداول قدیمی اضافه میشن ==========
-            self._run_migrations(conn)
-
             logger.info("Database initialized successfully")
         except Exception as e:
             logger.error(f"Database initialization error: {e}")
@@ -206,50 +202,28 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def _run_migrations(self, conn):
-        """اضافه کردن ستون‌های جدید به دیتابیس قدیمی"""
-        cursor = conn.cursor()
-        migrations = [
-            # payments جدول
-            ("payments", "receipt_file_id", "ALTER TABLE payments ADD COLUMN receipt_file_id TEXT"),
-            ("payments", "plan_id",         "ALTER TABLE payments ADD COLUMN plan_id INTEGER"),
-            ("payments", "admin_notes",     "ALTER TABLE payments ADD COLUMN admin_notes TEXT"),
-            # services جدول
-            ("services", "status",          "ALTER TABLE services ADD COLUMN status TEXT DEFAULT 'pending'"),
-            ("services", "config",          "ALTER TABLE services ADD COLUMN config TEXT DEFAULT ''"),
-            ("services", "expiry_date",     "ALTER TABLE services ADD COLUMN expiry_date TIMESTAMP"),
-        ]
-        for table, column, sql in migrations:
-            try:
-                cursor.execute(f"SELECT {column} FROM {table} LIMIT 1")
-            except sqlite3.OperationalError:
-                # ستون وجود نداره — اضافه کن
-                try:
-                    cursor.execute(sql)
-                    conn.commit()
-                    logger.info(f"Migration: added column '{column}' to '{table}'")
-                except Exception as e:
-                    logger.error(f"Migration error ({table}.{column}): {e}")
-
     # ========== USER OPERATIONS ==========
     def user_exists(self, telegram_id: int) -> bool:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM users WHERE telegram_id = ?', (telegram_id,))
+        cursor.execute('SELECT id FROM users WHERE telegram_id = %s', (telegram_id,))
         result = cursor.fetchone()
         conn.close()
         return result is not None
 
-    def create_user(self, telegram_id: int, username: str = None, first_name: str = None) -> int:
+    def create_user(self, telegram_id: int, username: str = None, first_name: str = None) -> Optional[int]:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('INSERT INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)',
-                           (telegram_id, username, first_name))
+            cursor.execute(
+                'INSERT INTO users (telegram_id, username, first_name) VALUES (%s, %s, %s) RETURNING id',
+                (telegram_id, username, first_name)
+            )
             conn.commit()
-            return cursor.lastrowid
+            return cursor.fetchone()[0]
         except Exception as e:
             logger.error(f"Error creating user: {e}")
+            conn.rollback()
             return None
         finally:
             conn.close()
@@ -257,7 +231,7 @@ class DatabaseManager:
     def get_user_id(self, telegram_id: int) -> Optional[int]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM users WHERE telegram_id = ?', (telegram_id,))
+        cursor.execute('SELECT id FROM users WHERE telegram_id = %s', (telegram_id,))
         result = cursor.fetchone()
         conn.close()
         return result[0] if result else None
@@ -265,7 +239,7 @@ class DatabaseManager:
     def get_user_wallet(self, user_id: int) -> float:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT wallet FROM users WHERE id = ?', (user_id,))
+        cursor.execute('SELECT wallet FROM users WHERE id = %s', (user_id,))
         result = cursor.fetchone()
         conn.close()
         return result[0] if result else 0.0
@@ -274,10 +248,11 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('UPDATE users SET last_activity = CURRENT_TIMESTAMP WHERE telegram_id = ?', (telegram_id,))
+            cursor.execute('UPDATE users SET last_activity = CURRENT_TIMESTAMP WHERE telegram_id = %s', (telegram_id,))
             conn.commit()
         except Exception as e:
             logger.error(f"Error updating activity: {e}")
+            conn.rollback()
         finally:
             conn.close()
 
@@ -285,11 +260,12 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('UPDATE users SET wallet = wallet + ? WHERE id = ?', (amount, user_id))
+            cursor.execute('UPDATE users SET wallet = wallet + %s WHERE id = %s', (amount, user_id))
             conn.commit()
             return True
         except Exception as e:
             logger.error(f"Error adding to wallet: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
@@ -298,12 +274,15 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('UPDATE users SET wallet = wallet - ? WHERE id = ? AND wallet >= ?',
-                           (amount, user_id, amount))
+            cursor.execute(
+                'UPDATE users SET wallet = wallet - %s WHERE id = %s AND wallet >= %s',
+                (amount, user_id, amount)
+            )
             conn.commit()
             return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"Error deducting wallet: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
@@ -312,7 +291,7 @@ class DatabaseManager:
     def get_all_plans(self) -> List[Plan]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id, name, price, traffic, duration FROM plans WHERE is_active = 1 ORDER BY price ASC')
+        cursor.execute('SELECT id, name, price, traffic, duration FROM plans WHERE is_active = TRUE ORDER BY price ASC')
         plans = [Plan(*row) for row in cursor.fetchall()]
         conn.close()
         return plans
@@ -320,7 +299,7 @@ class DatabaseManager:
     def get_plan(self, plan_id: int) -> Optional[Plan]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id, name, price, traffic, duration FROM plans WHERE id = ?', (plan_id,))
+        cursor.execute('SELECT id, name, price, traffic, duration FROM plans WHERE id = %s', (plan_id,))
         result = cursor.fetchone()
         conn.close()
         return Plan(*result) if result else None
@@ -329,14 +308,18 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('INSERT INTO plans (name, price, traffic, duration) VALUES (?, ?, ?, ?)',
-                           (name, price, traffic, duration))
+            cursor.execute(
+                'INSERT INTO plans (name, price, traffic, duration) VALUES (%s, %s, %s, %s)',
+                (name, price, traffic, duration)
+            )
             conn.commit()
             return True
-        except sqlite3.IntegrityError:
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
             return False
         except Exception as e:
             logger.error(f"Error adding plan: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
@@ -345,51 +328,50 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('UPDATE plans SET is_active = 0 WHERE id = ?', (plan_id,))
+            cursor.execute('UPDATE plans SET is_active = FALSE WHERE id = %s', (plan_id,))
             conn.commit()
             return True
         except Exception as e:
             logger.error(f"Error deleting plan: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
 
     # ========== SERVICE OPERATIONS ==========
     def create_pending_service(self, user_id: int, plan_id: int) -> int:
-        """یه سرویس pending بساز - قبل از تایید ادمین"""
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('''
-                INSERT INTO services (user_id, plan_id, config, status)
-                VALUES (?, ?, '', 'pending')
-            ''', (user_id, plan_id))
+            cursor.execute(
+                "INSERT INTO services (user_id, plan_id, config, status) VALUES (%s, %s, '', 'pending') RETURNING id",
+                (user_id, plan_id)
+            )
             conn.commit()
-            service_id = cursor.lastrowid
-            if not service_id:
-                raise Exception("lastrowid is None after insert")
+            service_id = cursor.fetchone()[0]
             logger.info(f"Pending service created: {service_id} for user {user_id}")
             return service_id
         except Exception as e:
             logger.error(f"Error creating pending service: {e}")
+            conn.rollback()
             raise
         finally:
             conn.close()
 
     def activate_service(self, service_id: int, config: str, duration_days: int) -> bool:
-        """سرویس رو فعال کن با کانفیگ و تاریخ انقضا"""
-        expiry_date = (datetime.now() + timedelta(days=duration_days)).isoformat()
+        expiry_date = datetime.now() + timedelta(days=duration_days)
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('''
-                UPDATE services SET config = ?, expiry_date = ?, status = 'active'
-                WHERE id = ?
-            ''', (config, expiry_date, service_id))
+            cursor.execute(
+                "UPDATE services SET config = %s, expiry_date = %s, status = 'active' WHERE id = %s",
+                (config, expiry_date, service_id)
+            )
             conn.commit()
             return True
         except Exception as e:
             logger.error(f"Error activating service: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
@@ -399,10 +381,11 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute('''
             SELECT s.id, s.user_id, s.plan_id, p.name, s.config, p.traffic,
-                   COALESCE(s.expiry_date, ''), s.purchase_date, s.status
+                   COALESCE(CAST(s.expiry_date AS TEXT), ''),
+                   CAST(s.purchase_date AS TEXT), s.status
             FROM services s
             JOIN plans p ON s.plan_id = p.id
-            WHERE s.user_id = ?
+            WHERE s.user_id = %s
             ORDER BY s.purchase_date DESC
         ''', (user_id,))
         services = [Service(*row) for row in cursor.fetchall()]
@@ -417,17 +400,17 @@ class DatabaseManager:
         try:
             cursor.execute('''
                 INSERT INTO payments (user_id, amount, status, payment_type, receipt_file_id, plan_id)
-                VALUES (?, ?, 'pending', ?, ?, ?)
+                VALUES (%s, %s, 'pending', %s, %s, %s)
+                RETURNING id
             ''', (user_id, amount, payment_type, receipt_file_id, plan_id))
             conn.commit()
-            payment_id = cursor.lastrowid
-            if not payment_id:
-                raise Exception("lastrowid is None after insert")
+            payment_id = cursor.fetchone()[0]
             logger.info(f"Payment created: {payment_id} for user {user_id}")
             return payment_id
         except Exception as e:
             logger.error(f"Error adding payment: {e}")
-            raise  # بجای None برگردوندن، خطا رو throw کن
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -435,12 +418,12 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('UPDATE payments SET receipt_file_id = ? WHERE id = ?',
-                           (receipt_file_id, payment_id))
+            cursor.execute('UPDATE payments SET receipt_file_id = %s WHERE id = %s', (receipt_file_id, payment_id))
             conn.commit()
             return True
         except Exception as e:
             logger.error(f"Error updating receipt: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
@@ -455,7 +438,7 @@ class DatabaseManager:
                        p.receipt_file_id, p.plan_id
                 FROM payments p
                 JOIN users u ON p.user_id = u.id
-                WHERE p.id = ?
+                WHERE p.id = %s
             ''', (payment_id,))
             row = cursor.fetchone()
             if row:
@@ -476,11 +459,12 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("UPDATE payments SET status = 'approved' WHERE id = ?", (payment_id,))
+            cursor.execute("UPDATE payments SET status = 'approved' WHERE id = %s", (payment_id,))
             conn.commit()
             return True
         except Exception as e:
             logger.error(f"Error approving payment: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
@@ -489,11 +473,12 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("UPDATE payments SET status = 'rejected' WHERE id = ?", (payment_id,))
+            cursor.execute("UPDATE payments SET status = 'rejected' WHERE id = %s", (payment_id,))
             conn.commit()
             return True
         except Exception as e:
             logger.error(f"Error rejecting payment: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
@@ -524,11 +509,12 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('INSERT INTO support_messages (user_id, message) VALUES (?, ?)', (user_id, message))
+            cursor.execute('INSERT INTO support_messages (user_id, message) VALUES (%s, %s)', (user_id, message))
             conn.commit()
             return True
         except Exception as e:
             logger.error(f"Error adding support message: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
@@ -540,7 +526,7 @@ class DatabaseManager:
         try:
             cursor.execute('SELECT COUNT(*) FROM users')
             total_users = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM users WHERE last_activity >= datetime('now', '-7 days')")
+            cursor.execute("SELECT COUNT(*) FROM users WHERE last_activity >= NOW() - INTERVAL '7 days'")
             active_users = cursor.fetchone()[0]
             cursor.execute("SELECT COUNT(*) FROM services WHERE status = 'active'")
             total_services = cursor.fetchone()[0]
@@ -600,7 +586,7 @@ class DatabaseManager:
                 FROM users u
                 LEFT JOIN services s ON u.id = s.user_id AND s.status = 'active'
                 LEFT JOIN payments p ON u.id = p.user_id AND p.status = 'approved'
-                WHERE u.telegram_id = ?
+                WHERE u.telegram_id = %s
                 GROUP BY u.id
             ''', (telegram_id,))
             row = cursor.fetchone()
@@ -617,6 +603,20 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def update_payment_amount(self, payment_id: int, amount: float) -> bool:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('UPDATE payments SET amount = %s WHERE id = %s', (amount, payment_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating payment amount: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
 
 # ==================== BOT HANDLERS ====================
 class BotHandlers:
@@ -626,7 +626,6 @@ class BotHandlers:
     def is_admin(self, user_id: int) -> bool:
         return user_id in ADMIN_IDS
 
-    # ==================== HELPER ====================
     async def _notify_admins(self, context, text: str, parse_mode: str = 'HTML'):
         for admin_id in ADMIN_IDS:
             try:
@@ -640,7 +639,6 @@ class BotHandlers:
         if not self.db.user_exists(user.id):
             self.db.create_user(user.id, user.username, user.first_name)
         self.db.update_user_activity(user.id)
-        # پاک کردن state قبلی
         context.user_data.clear()
 
         if self.is_admin(user.id):
@@ -700,16 +698,13 @@ class BotHandlers:
                 await update.message.reply_text('❌ لطفا از منو استفاده کنید.')
 
     async def handle_photo_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """هندل عکس رسید از کاربر"""
         user = update.effective_user
         state = context.user_data.get('state')
-
         logger.info(f"Photo received from {user.id}, state={state}, user_data={context.user_data}")
 
         if state == UserState.WAITING_FOR_RECEIPT_PHOTO.value:
             await self.receive_receipt_photo(update, context)
         else:
-            # اگه state نداره، راهنمایی بده
             await update.message.reply_text(
                 '⚠️ برای ارسال رسید، ابتدا روی دکمه *"📤 ارسال رسید پرداخت کارت"* کلیک کنید.\n\n'
                 'سپس عکس رسید را بفرستید.',
@@ -738,7 +733,6 @@ class BotHandlers:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
     async def handle_plan_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """نمایش فاکتور + گزینه‌های پرداخت"""
         query = update.callback_query
         await query.answer()
 
@@ -752,7 +746,6 @@ class BotHandlers:
         user_id = self.db.get_user_id(telegram_id)
         wallet = self.db.get_user_wallet(user_id)
 
-        # ذخیره پلن انتخابی
         context.user_data['selected_plan_id'] = plan_id
 
         invoice_text = f"""
@@ -770,10 +763,7 @@ class BotHandlers:
 🏦 بانک: {CARD_BANK}
 ━━━━━━━━━━━━━━━━━━━━━━━
 """
-
         keyboard = []
-
-        # اگه موجودی کافی داره، گزینه پرداخت از کیف پول هم بده
         if wallet >= plan.price:
             invoice_text += f'\n👛 موجودی کیف پول شما: *{wallet:,.0f} تومان* ✅\n'
             keyboard.append([InlineKeyboardButton(
@@ -788,7 +778,6 @@ class BotHandlers:
         await query.edit_message_text(invoice_text, reply_markup=reply_markup, parse_mode='Markdown')
 
     async def pay_from_wallet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """پرداخت مستقیم از کیف پول"""
         query = update.callback_query
         await query.answer()
 
@@ -806,9 +795,7 @@ class BotHandlers:
             await query.edit_message_text('❌ خطا در پردازش پرداخت.')
             return
 
-        # ثبت سرویس pending
         service_id = self.db.create_pending_service(user_id, plan_id)
-        # ثبت پرداخت approved (چون از کیف پول بوده)
         payment_id = self.db.add_payment(user_id, plan.price, 'wallet_purchase', None, plan_id)
         self.db.approve_payment(payment_id)
 
@@ -820,7 +807,6 @@ class BotHandlers:
             parse_mode='Markdown'
         )
 
-        # اطلاع به ادمین
         admin_text = (
             f'💰 <b>خرید از کیف پول جدید!</b>\n\n'
             f'👤 کاربر: {query.from_user.mention_html()}\n'
@@ -834,7 +820,6 @@ class BotHandlers:
         await self._notify_admins(context, admin_text)
 
     async def request_receipt_for_plan(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """درخواست ارسال رسید برای خرید کارتی"""
         query = update.callback_query
         await query.answer()
 
@@ -862,14 +847,11 @@ class BotHandlers:
             f'موجودی: *{wallet:,.0f} تومان*\n'
             f'━━━━━━━━━━━━━━━━━━━━━━━'
         )
-        keyboard = [
-            [InlineKeyboardButton('💳 شارژ کیف پول', callback_data='charge_wallet')],
-        ]
+        keyboard = [[InlineKeyboardButton('💳 شارژ کیف پول', callback_data='charge_wallet')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
     async def charge_wallet_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """نمایش اطلاعات واریز برای شارژ کیف پول"""
         query = update.callback_query
         await query.answer()
 
@@ -883,7 +865,6 @@ class BotHandlers:
             f'مبلغ دلخواه واریز کنید و سپس *عکس رسید* ارسال کنید.\n'
             f'پس از تایید ادمین، کیف پول شما شارژ می‌شود.'
         )
-
         keyboard = [
             [InlineKeyboardButton('📤 ارسال رسید', callback_data='send_receipt_wallet')],
             [InlineKeyboardButton('❌ انصراف', callback_data='back_to_menu')]
@@ -892,7 +873,6 @@ class BotHandlers:
         await query.edit_message_text(invoice_text, reply_markup=reply_markup, parse_mode='Markdown')
 
     async def request_receipt_for_wallet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """درخواست رسید برای شارژ کیف پول"""
         query = update.callback_query
         await query.answer()
 
@@ -907,7 +887,6 @@ class BotHandlers:
 
     # ==================== RECEIPT HANDLER ====================
     async def receive_receipt_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """دریافت عکس رسید از کاربر"""
         user = update.effective_user
         user_id = self.db.get_user_id(user.id)
         receipt_type = context.user_data.get('receipt_type', '')
@@ -922,7 +901,6 @@ class BotHandlers:
             await update.message.reply_text('❌ لطفا عکس ارسال کنید.')
             return
 
-        # گرفتن بهترین کیفیت عکس
         photo = update.message.photo[-1]
         file_id = photo.file_id
         logger.info(f"Photo file_id: {file_id}")
@@ -941,7 +919,6 @@ class BotHandlers:
                     context.user_data.clear()
                     return
 
-                # ثبت پرداخت و سرویس pending
                 payment_id = self.db.add_payment(user_id, plan.price, 'card_purchase', file_id, plan_id)
                 service_id = self.db.create_pending_service(user_id, plan_id)
 
@@ -972,22 +949,13 @@ class BotHandlers:
                     InlineKeyboardButton('❌ رد رسید', callback_data=reject_data)
                 ]])
 
-                sent_count = 0
                 for admin_id in ADMIN_IDS:
                     try:
-                        await context.bot.send_photo(
-                            admin_id, file_id,
-                            caption=caption,
-                            parse_mode='HTML',
-                            reply_markup=keyboard
-                        )
-                        sent_count += 1
+                        await context.bot.send_photo(admin_id, file_id, caption=caption,
+                                                     parse_mode='HTML', reply_markup=keyboard)
                         logger.info(f"Receipt sent to admin {admin_id}")
                     except Exception as e:
                         logger.error(f"Error sending receipt to admin {admin_id}: {e}")
-
-                if sent_count == 0:
-                    logger.error("Receipt not sent to ANY admin!")
 
             elif receipt_type == 'wallet_charge':
                 payment_id = self.db.add_payment(user_id, 0, 'wallet_charge', file_id, None)
@@ -1014,20 +982,12 @@ class BotHandlers:
                     InlineKeyboardButton('❌ رد رسید', callback_data=f'arj|{payment_id}|{user.id}')
                 ]])
 
-                sent_count = 0
                 for admin_id in ADMIN_IDS:
                     try:
-                        await context.bot.send_photo(
-                            admin_id, file_id,
-                            caption=caption,
-                            parse_mode='HTML',
-                            reply_markup=keyboard
-                        )
-                        sent_count += 1
-                        logger.info(f"Wallet receipt sent to admin {admin_id}")
+                        await context.bot.send_photo(admin_id, file_id, caption=caption,
+                                                     parse_mode='HTML', reply_markup=keyboard)
                     except Exception as e:
                         logger.error(f"Error sending wallet receipt to admin {admin_id}: {e}")
-
             else:
                 logger.error(f"Unknown receipt_type: '{receipt_type}'")
                 await update.message.reply_text('❌ خطا: نوع رسید نامشخص. دوباره از منو شروع کنید.')
@@ -1035,9 +995,7 @@ class BotHandlers:
         except Exception as e:
             logger.error(f"receive_receipt_photo error: {e}", exc_info=True)
             await update.message.reply_text('❌ خطا در پردازش رسید. لطفا دوباره تلاش کنید.')
-
         finally:
-            # همیشه state پاک میشه
             context.user_data.clear()
 
     # ==================== USER: سرویس‌ها ====================
@@ -1092,11 +1050,9 @@ class BotHandlers:
 
     # ==================== ADMIN: callbacks ====================
     async def admin_approve_plan(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """ادمین تایید کرد - باید کانفیگ بفرسته"""
         query = update.callback_query
         await query.answer()
 
-        # فرمت: aap|payment_id|service_id|user_telegram_id|plan_id
         parts = query.data.split('|')
         try:
             payment_id = int(parts[1])
@@ -1132,11 +1088,9 @@ class BotHandlers:
         )
 
     async def admin_approve_wallet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """ادمین شارژ کیف پول رو تایید کرد - باید مبلغ بده"""
         query = update.callback_query
         await query.answer()
 
-        # فرمت: aaw|payment_id|user_telegram_id
         parts = query.data.split('|')
         try:
             payment_id = int(parts[1])
@@ -1164,11 +1118,9 @@ class BotHandlers:
         )
 
     async def admin_reject_payment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """ادمین رسید رو رد کرد"""
         query = update.callback_query
         await query.answer()
 
-        # فرمت: arj|payment_id|user_telegram_id
         parts = query.data.split('|')
         try:
             payment_id = int(parts[1])
@@ -1180,10 +1132,13 @@ class BotHandlers:
 
         self.db.reject_payment(payment_id)
 
-        await query.edit_message_caption(
-            caption=query.message.caption + '\n\n❌ رد شد.',
-            parse_mode='HTML'
-        )
+        try:
+            await query.edit_message_caption(
+                caption=query.message.caption + '\n\n❌ رد شد.',
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
 
         try:
             await context.bot.send_message(
@@ -1203,15 +1158,12 @@ class BotHandlers:
         if admin_state == UserState.ADMIN_WAITING_FOR_CONFIG.value:
             await self.receive_admin_config(update, context)
             return
-
         if admin_state == UserState.ADMIN_WAITING_FOR_WALLET_AMOUNT.value:
             await self.receive_admin_wallet_amount(update, context)
             return
-
         if admin_state == UserState.ADMIN_WAITING_FOR_BROADCAST.value:
             await self.send_broadcast(update, context)
             return
-
         if admin_state == UserState.ADMIN_WAITING_FOR_PLAN_NAME.value:
             await self.receive_plan_name(update, context)
             return
@@ -1225,10 +1177,8 @@ class BotHandlers:
             await self.receive_plan_duration(update, context)
             return
 
-        # دکمه‌های منو اول چک میشن — هر state ای که باشه کنسل میشه
         MENU_BUTTONS = {'📊 آمار', '👤 کاربران', '💰 تراکنش‌ها', '📦 پلن‌ها', '📨 پیام همگانی', '⚙️ تنظیمات'}
         if text in MENU_BUTTONS:
-            # کنسل کردن هر state قبلی
             context.user_data.pop('admin_state', None)
             if text == '📊 آمار':
                 await self.show_statistics(update, context)
@@ -1251,14 +1201,12 @@ class BotHandlers:
         await update.message.reply_text('❌ دستور نامشخص.')
 
     async def receive_admin_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """دریافت کانفیگ از ادمین و ارسال به کاربر"""
         config_text = update.message.text.strip()
         payment_id = context.user_data.get('pending_payment_id')
         service_id = context.user_data.get('pending_service_id')
         user_telegram_id = context.user_data.get('pending_user_telegram_id')
         plan_info = context.user_data.get('pending_plan', {})
 
-        # فعال‌سازی سرویس در دیتابیس
         self.db.activate_service(service_id, config_text, plan_info.get('duration', 30))
         self.db.approve_payment(payment_id)
 
@@ -1268,7 +1216,6 @@ class BotHandlers:
         context.user_data.pop('pending_user_telegram_id', None)
         context.user_data.pop('pending_plan', None)
 
-        # ارسال کانفیگ به کاربر
         try:
             await context.bot.send_message(
                 user_telegram_id,
@@ -1285,7 +1232,6 @@ class BotHandlers:
             await update.message.reply_text(f'❌ خطا در ارسال به کاربر: {e}')
 
     async def receive_admin_wallet_amount(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """دریافت مبلغ از ادمین برای شارژ کیف پول"""
         try:
             amount = float(update.message.text.replace(',', '').strip())
             if amount <= 0:
@@ -1296,13 +1242,7 @@ class BotHandlers:
             user_telegram_id = context.user_data.get('pending_user_telegram_id')
             user_id = self.db.get_user_id(user_telegram_id)
 
-            # آپدیت مبلغ و تایید پرداخت
-            conn = self.db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('UPDATE payments SET amount = ? WHERE id = ?', (amount, payment_id))
-            conn.commit()
-            conn.close()
-
+            self.db.update_payment_amount(payment_id, amount)
             self.db.approve_payment(payment_id)
             self.db.add_wallet(user_id, amount)
 
@@ -1398,9 +1338,7 @@ class BotHandlers:
         text = f'📦 *پلن‌ها ({len(plans)})*\n\n'
         for p in plans:
             text += f'#{p.id} *{p.name}* — {p.price:,.0f}t | {p.traffic} | {p.duration}روز\n'
-        keyboard = [
-            [InlineKeyboardButton('➕ پلن جدید', callback_data='add_new_plan')],
-        ]
+        keyboard = [[InlineKeyboardButton('➕ پلن جدید', callback_data='add_new_plan')]]
         if plans:
             keyboard.append([InlineKeyboardButton('🗑️ حذف پلن', callback_data='show_delete_plans')])
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1544,30 +1482,35 @@ class BotHandlers:
 
 # ==================== MAIN ====================
 def main():
-    logger.info("Starting V2Ray Config Bot...")
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL environment variable is not set!")
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN environment variable is not set!")
 
-    db = DatabaseManager(DATABASE_PATH)
+    logger.info("Starting V2Ray Config Bot with PostgreSQL...")
+
+    db = DatabaseManager(DATABASE_URL)
 
     if not db.get_all_plans():
         logger.info("Adding default plans...")
-        db.add_plan('1GB', 347000, '1 GB', 90)
-        db.add_plan('2GB ', 547000, '2 GB', 90)
-        db.add_plan('3GB ', 947000, '3 GB', 90)
-        db.add_plan('5GB ',1347000, '5 GB', 90)
-        db.add_plan('10GB ',2247000, '10 GB', 90)
-        db.add_plan('15GB ',3147000, '15 GB', 90)
-        db.add_plan('20GB ',4547000, '20 GB', 90)
-        
-    app = Application.builder().token(BOT_TOKEN).build()
+        db.add_plan('1GB',   347000, '1 GB',  90)
+        db.add_plan('2GB',   547000, '2 GB',  90)
+        db.add_plan('3GB',   947000, '3 GB',  90)
+        db.add_plan('5GB',  1347000, '5 GB',  90)
+        db.add_plan('10GB', 2247000, '10 GB', 90)
+        db.add_plan('15GB', 3147000, '15 GB', 90)
+        db.add_plan('20GB', 4547000, '20 GB', 90)
+
+    application = Application.builder().token(BOT_TOKEN).build()
     handlers = BotHandlers(db)
 
-    app.add_handler(CommandHandler('start', handlers.start))
-    app.add_handler(MessageHandler(filters.PHOTO, handlers.handle_photo_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_user_message))
-    app.add_handler(CallbackQueryHandler(handlers.handle_callback))
+    application.add_handler(CommandHandler('start', handlers.start))
+    application.add_handler(MessageHandler(filters.PHOTO, handlers.handle_photo_message))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_user_message))
+    application.add_handler(CallbackQueryHandler(handlers.handle_callback))
 
     logger.info("Bot started!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':
